@@ -11,6 +11,8 @@ Notes:
 import logging
 import re
 import os
+import re
+import itertools
 
 # Import salt libs
 import salt.utils
@@ -76,18 +78,46 @@ def _resource_add(resource, name, settings=None, arg_name_override=None):
         return False
     return True
 
+
+def _resource_get_config_setting(resource, name, setting):
+    cmd_ret = __salt__['cmd.run_all']([appcmd, 'list', resource.upper(), '/{0}.name:{1}'.format(resource.lower(), name), '/text:{0}'.format(setting)])
+    if cmd_ret['retcode'] != 0:
+        log.warn('can\'t get "{0}" from {1} "{2}"'.format(setting, resource, name))
+        value = ''
+    else:
+        value = cmd_ret['stdout'].strip()
+    return cmd_ret['retcode'], value
+
+
 def _resource_get_config(resource, name, settings):
     '''
     Returns the configuration of the Resource
     '''
 
     ret = {}
-    for i in settings:
-        cmd_ret = __salt__['cmd.run_all']([appcmd, 'list', resource.upper(), '/{0}.name:{1}'.format(resource.lower(), name), '/text:{0}'.format(i)])
-        if cmd_ret['retcode'] != 0:
-            log.error('can\'t get "{0}" from {1} "{2}"'.format(i, resource, name))
-            return False
-        ret[i] = cmd_ret['stdout'].strip()
+    for setting in settings:
+        details = _key_details(setting)
+        if 'attributes' in details:
+            value = []
+            while(True):
+                key = details['key']
+                sub_value_dict = {}
+                for sub_value_key in details['attributes']:
+                    indexed_setting = '{0}.[@{1}].{2}'.format(key, len(value), sub_value_key)
+                    cmd_ret, sub_value = _resource_get_config_setting(resource, name, indexed_setting)
+                    if cmd_ret != 0:
+                        continue
+                    sub_value_dict[sub_value_key] = sub_value
+
+                # if we can't find any sub_values for this index, we must be done iterating
+                if not sub_value_dict:
+                    break
+
+                value.append(sub_value_dict)
+        else:
+            _, value = _resource_get_config_setting(resource, name, details['key'])
+
+        ret[setting] = value
     return ret
 
 
@@ -96,7 +126,13 @@ def _resource_set(resource, name, settings):
     Configure the resource with the settings dictionary
     '''
 
+    _clear_indexed_resource_properties(resource, name, settings)
+
     settings_params = _serialize_settings(settings)
+    if not settings_params:
+        log.info("No settings to configure.")
+        return True
+
     cmd_ret = __salt__['cmd.run_all']([appcmd, 'set', resource.upper(), name] + settings_params)
     if cmd_ret['retcode'] != 0:
         log.error('failed configuring {0}'.format(resource))
@@ -105,17 +141,14 @@ def _resource_set(resource, name, settings):
     return True
 
 
-
 def _resource_action(resource, name, action, ignoreNonExist=False):
     '''
     Generic fanction to Start / Stop / Delete  the resource
     '''
 
-    if  name not in _resource_list(resource) and ignoreNonExist == False:
-        log.error('not existing {0} {1}'.format(resource,name))
+    if name not in _resource_list(resource) and ignoreNonExist is False:
+        log.error('not existing {0} {1}'.format(resource, name))
         return False
-
-
 
     cmd_ret = __salt__['cmd.run_all']([appcmd, action.upper(), resource.upper(), name])
     if cmd_ret['retcode'] != 0:
@@ -125,6 +158,62 @@ def _resource_action(resource, name, action, ignoreNonExist=False):
     return True
 
 
+def _key_details(key):
+    '''
+    Returns a dictionary with the name of the key in 'key' and a list of
+    attributes in 'attributes' if there are any.
+
+    For example:
+        key_details('foo.bar') returns {'name': 'foo.bar'}
+        key_details('foo.bar.[a,b]) returns {'foo.bar', 'attributes': ['a', 'b']}
+    '''
+
+    pcre = re.compile(r'(.*)\.\[(.*)\]')
+    match = pcre.match(key)
+    if not match:
+        return {'key': key}
+    else:
+        return {'key': match.group(1), 'attributes': [attribute.strip() for attribute in match.group(2).split(',')]}
+
+
+def _clear_indexed_resource_properties(resource, name, settings):
+    '''
+    Find all indexed properties for a given resource and delete existing entries
+    '''
+
+    for k, v in settings.iteritems():
+        details = _key_details(k)
+        if 'attributes' in details:
+            while (True):
+                clear_param = '/-{0}.[@0]'.format(details['key'])
+                cmd_ret = __salt__['cmd.run_all']([appcmd, 'set', resource.upper(), name, clear_param])
+                if cmd_ret['retcode'] != 0:
+                    break
+
+
+def _serialize_setting(key, value):
+    '''
+    Serialize a given k/v pair into a list of parameter set commands. If the entry
+    is a list, transform it into the /+ syntax.
+    '''
+
+    if isinstance(value, basestring):
+        return ['/{0}:{1}'.format(key, value)]
+
+    # otherwise we will assume it is a list of dictionaries
+    details = _key_details(key)
+    if 'attributes' not in details:
+        log.error('{0} is not correctly set up as an indexed property'.format(key))
+        return
+
+    settings = []
+    for sub_value_dict in value:
+        indexed_setting = ','.join('{0}="{1}"'.format(k, v) for k, v in sub_value_dict.iteritems())
+        settings.append('/+{0}.[{1}]'.format(details['key'], indexed_setting))
+
+    return settings
+
+
 def _serialize_settings(settings):
     '''
     Serialize the settings dict to appcmd argument
@@ -132,10 +221,9 @@ def _serialize_settings(settings):
 
     if not settings:
         return []
-    return map(
-        lambda (k, v): '/{0}:{1}'.format(k, v),
-        settings.iteritems()
-    )
+
+    list_of_lists = [_serialize_setting(k, v) for (k, v) in settings.iteritems() if _serialize_setting(k, v) is not None]
+    return list(itertools.chain.from_iterable(list_of_lists))  # flatten the lists out
 
 
 ##############################

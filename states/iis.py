@@ -53,13 +53,21 @@ def _resource_present(resource, name, settings, alt_name=None):
     except:
         need_2_add = True
 
-
-
     need_2_config = {}
+    prev_config = None
     if not need_2_add:
-        for key, value in __salt__['iis.{0}_get_config'.format(resource)](alt_name, settings.keys()).iteritems():
-            if value.lower() != str(settings[key]).lower():
+        prev_config = __salt__['iis.{0}_get_config'.format(resource)](alt_name, settings.keys())
+        for key, value in prev_config.iteritems():
+            update_needed = False
+            if isinstance(value, basestring):
+                if value.lower() != str(settings[key]).lower():
+                    update_needed = True
+            elif value != settings[key]:
+                update_needed = True
+
+            if update_needed:
                 need_2_config.update({key: settings[key]})
+
         if not need_2_config:
             return ret
 
@@ -86,8 +94,11 @@ def _resource_present(resource, name, settings, alt_name=None):
         ret['comment'] = 'could not configure {1} "{0}", settings: {2}'.format(alt_name, resource, need_2_config)
         ret['result'] = False
         return ret
+
     ret['comment'] = '{1} "{0}" configured'.format(name, resource)
     ret['changes']['config'] = need_2_config
+    if prev_config:
+        ret['changes']['old'] = {k: v for k, v in prev_config.iteritems() if k in need_2_config}
     return ret
 
 
