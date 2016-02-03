@@ -37,6 +37,20 @@ base_folders = ('grains', 'modules', 'renderers', 'runners', 'states')
 
 unsafe_modules = ('ansible','drizzle')
 
+def symlink(source, link_name):
+    import os
+    os_symlink = getattr(os, "symlink", None)
+    if callable(os_symlink):
+        os_symlink(source, link_name)
+    else:
+        import ctypes
+        csl = ctypes.windll.kernel32.CreateSymbolicLinkW
+        csl.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
+        csl.restype = ctypes.c_ubyte
+        flags = 1 if os.path.isdir(source) else 0
+        if csl(link_name, source, flags) == 0:
+            raise ctypes.WinError()
+
 def get_files(target, exclude, folders = base_folders):
     '''
     Returns a list of files to link
@@ -87,7 +101,7 @@ def link(source, dest):
             os.symlink(source, dest)
             return True
         except:
-            logger.warning("Failed to created {0}".format(dest))
+            logger.warning("Failed to create {0}".format(dest))
             
     return False
             
